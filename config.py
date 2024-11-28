@@ -1,5 +1,19 @@
 class config:
+    #Flask settings
+    port=8000
     debug = False
-    tty = '/dev/tty.usbmodemNT20091014001' #tty address for the display
+    #
+    # ---- Display Params ----
+    tty = '/dev/tty.usbmodemNT20091014001'
+    baudrate = 19200
+    timeout = 1
+    columns: 20 #display columns, for scrolling behaviour. please note that this program only supports 2 rows
+    #
+    # ---- General Configuration ----
     blinkspeed = 0.5 
     scrollspeed = 0.2
+    defaultFadetime = 10 #by default, how long is a message displayed on the screen before returning to default state?
+    blankDefaultState = False #if this is set to true, the display's default state will be blank and the following two lines are not used for anything.
+    defaultStateLine1 = "this is the default"
+    defaultStateLine2 = "state"
+    avaliableFeatures = "<fadetime>/<blink>"

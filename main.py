@@ -1,5 +1,3 @@
-#todo threading
-
 from flask import Flask
 from config import config
 import serial
@@ -10,41 +8,116 @@ import threading
 app = Flask(__name__)
 lock = threading.Lock()
 is_running = False
+stop_loop=False
+
+
+# ---- Write Pipelines ----
 
 def regular_send_thread(*args, **kwargs):
     thread = threading.Thread(target=regular_send, args=args, kwargs=kwargs)
     thread.start()
 
-
-def regular_send(str1, str2, fadetime=config.defaultFadetime):
+def regular_send(*args, fadetime=config.defaultFadetime, **kwargs):
     global is_running
     while True:
         with lock:
             if not is_running:
                 is_running = True
                 break
-    direct_write(str1, str2, False) 
+    write_pipeline_thread(*args, fadetime=fadetime, **kwargs) #tk 
     time.sleep(fadetime)
     default_state(fadetime)
-    with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser:
-        ser.close()
-        
-def direct_write(str1, str2, close):
+
+def write_pipeline_thread(*args, **kwargs):
+    thread = threading.Thread(target=write_pipeline, args=args, kwargs=kwargs)
+    thread.start()
+
+def write_pipeline(str1, str2, close=True, scroll=False, blink=False, *args, **kwargs): #tk change default of scroll when its implemented
+    if scroll == False and blink == False: #if it doesnt use special features, we can just write it directly
+        direct_write(str1=str1, str2=str2, close=close) 
+    elif scroll == True and blink == True:
+        direct_write(str1="Err", str2="2", close=close) #Error 2, scroll and blink are both enabled. can't do this atm sorry!
+        raise(Exception, "Error 2, scroll and blink cannot both be enabled.")
+    elif scroll == True:
+        if not len(str1) <= config.columns and not len(str2) <= config.columns: #maybe make it wiggle if it doesnt need to scroll but not right now
+            direct_write(str1, str2, close=close)
+        else:
+            scroll(str1=str1, str2=str2, args=args, kwargs=kwargs)
+    elif blink == True:
+        blink(str1=str1, str2=str2, args=args, kwargs=kwargs)
+
+def direct_write(str1, str2, close=True):
     with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser: 
-        ser.write(f'\r{str1} \r'.encode())
+        ser.write(f'\r{str1}\r'.encode())
         if str2:
             ser.write(str2.encode())
         if close == True:
-            ser.close()
+                ser.close()
 
 def default_state(fadetime=0):
+    global stop_loop
+    stop_loop=True
     if fadetime == 0:
-        errorout("Fadetime is zero! Fadetime wasn't passed along somewhere, was set to zero in the URL, or there was some sort of other fuckup.")
+        direct_write(str1="Err", str2="1", close=True)
+        raise(Exception, "Error 1, fadetime is zero! Fadetime wasn't passed along somewhere or was set to zero in the URL")
     if config.blankDefaultState == True: #blank the display
-        direct_write("\r\r\r\r")
+        blank()
         print("Blanked the display.")
     else:
         direct_write(config.defaultStateLine1, config.defaultStateLine2, True)
+
+# ---- Screen Functions ----
+
+def blank(close=True):
+    with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser: 
+        ser.write(f'\r \r \r \r'.encode())  
+        if close == True:     
+            ser.close()
+
+def blink(str1, str2, close, blinkspeed=config.blinkspeed, *args, **kwargs):
+    global stop_loop
+    while not stop_loop:
+        with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser:
+            direct_write(str1, str2, close=False)
+            time.sleep(blinkspeed)
+            blank(close=False)
+            time.sleep(blinkspeed)
+
+def scroll(str1, str2, close, *args, **kwargs): #there's gotta be a better way to do this right? tk 
+    if not len(str1) > config.columns and len(str2) > config.columns:
+        scrollboth(str1, str2, close=close)
+    elif len(str1) > config.columns:
+        scroll1(str1, str2, close=close)
+    elif len(str2) > config.columns:
+        scroll2(str1, str2, close=close)
+
+
+def scroll0(str1, str2, close, *args, **kwargs):
+    global stop_loop
+    str1len = len(str1)
+    str1list = list(str1)
+    wrapped_str1 = str1 + str1[:config.columns]
+    while not stop_loop:
+        for i in range(len(str1) + config.columns - 1):
+            str1_slice = wrapped_str1[i:i + config.columns - 1]
+            direct_write(str1=str1_slice, str2=str2, close=False)
+            print(str1_slice)
+            time.sleep(config.scrollspeed)
+
+def scroll1(str1, str2, close, *args, **kwargs):
+    global stop_loop
+    str1len = len(str1)
+    str1 = " " + str1 + " "
+    while not stop_loop:
+        for i in range(len(str1)):
+            str1_slice = str1[i:i + config.columns - 1]
+            direct_write(str1=str1_slice, str2=str2, close=False)
+            print(str1_slice)
+            time.sleep(config.scrollspeed)
+
+
+
+
 
 
 # ---- Flask Paths ----
@@ -59,7 +132,7 @@ def entering(str2):
 @app.route('/display/<str1>', methods=['GET'])
 @app.route('/display/<str1>:<str2>', methods=['GET'])
 def display(str1=None, str2=None):
-    regular_send_thread(str1, str2)
+    regular_send_thread(str1=str1, str2=str2)
     print(f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
     return f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
 
@@ -76,16 +149,13 @@ def test():
         regular_send_thread("Check", "Config", 20)
     return f"If you saw some text on the display, you're all set!", 200
 
+@app.route('/testscroll', methods=['GET'])
+def testscroll():
+    scroll1("onetwothreefourfivesixseveneightnine", "test", close=True)
+    return f"pls", 200
+
 if __name__ == '__main__':
     app.run(port=config.port, debug=True)
     default_state(fadetime=1)
 
-
-
-# ---- Other Funcs ----
-
-
-def errorout(str1="Unknown Error Thrown!"):
-    raise Exception(str1)
-    direct_write("Exception Thrown", "Check Console")
 

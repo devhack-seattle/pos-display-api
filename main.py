@@ -8,8 +8,9 @@ import threading
 app = Flask(__name__)
 lock = threading.Lock()
 is_running = False
-stop_loop=False
-
+stop_loop = False
+defaultstateline1 = config.defaultStateLine1
+defaultstateline2 = config.defaultStateLine2
 
 # ---- Write Pipelines ----
 
@@ -26,7 +27,7 @@ def regular_send(*args, fadetime=config.defaultFadetime, **kwargs):
                 break
     write_pipeline_thread(*args, fadetime=fadetime, **kwargs) #tk 
     time.sleep(fadetime)
-    default_state(fadetime)
+    default_state()
 
 def write_pipeline_thread(*args, **kwargs):
     thread = threading.Thread(target=write_pipeline, args=args, kwargs=kwargs)
@@ -54,17 +55,22 @@ def direct_write(str1, str2, close=True):
         if close == True:
                 ser.close()
 
-def default_state(fadetime=0):
-    global stop_loop
+def default_state():
+    global stop_loop, defaultstateline1, defaultstateline2
     stop_loop=True
-    if fadetime == 0:
-        direct_write(str1="Err", str2="1", close=True)
-        raise(Exception, "Error 1, fadetime is zero! Fadetime wasn't passed along somewhere or was set to zero in the URL")
     if config.blankDefaultState == True: #blank the display
         blank()
         print("Blanked the display.")
+    elif config.dynamicDefaultState == True:
+        direct_write(defaultstateline1, defaultstateline2)
     else:
         direct_write(config.defaultStateLine1, config.defaultStateLine2, True)
+
+def set_default_state(str1, str2):
+    global defaultstateline1, defaultstateline2
+    defaultstateline1 = str1
+    defaultstateline2 = str2
+
 
 # ---- Screen Functions ----
 
@@ -76,6 +82,7 @@ def blank(close=True):
 
 def blink(str1, str2, close, blinkspeed=config.blinkspeed, *args, **kwargs):
     global stop_loop
+    stop_loop = False
     while not stop_loop:
         with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser:
             direct_write(str1, str2, close=False)
@@ -94,6 +101,7 @@ def scroll(str1, str2, close, *args, **kwargs): #there's gotta be a better way t
 
 def scroll0(str1, str2, close, *args, **kwargs):
     global stop_loop
+    stop_loop = False
     str1len = len(str1)
     str1list = list(str1)
     wrapped_str1 = str1 + str1[:config.columns]
@@ -106,6 +114,7 @@ def scroll0(str1, str2, close, *args, **kwargs):
 
 def scroll1(str1, str2, close, *args, **kwargs):
     global stop_loop
+    stop_loop = False
     str1len = len(str1)
     str1 = " " + str1 + " "
     while not stop_loop:
@@ -135,6 +144,12 @@ def display(str1=None, str2=None):
     regular_send_thread(str1=str1, str2=str2)
     print(f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
     return f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
+
+@app.route('/default/<str1>:<str2>', methods=['GET'])
+def entering(str1, str2):
+    set_default_state(str1, str2)
+    print(f"Set 2 lines as default on display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
+    return f"Set 2 lines as default on display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
 
 @app.route('/test', methods=['GET'])
 def test():

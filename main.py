@@ -1,8 +1,12 @@
+#TODO top line doesnt take 20char. make this configurable. update default state occasionally
+#TODO later move all the send commands to their own file so that various send commands will be supported
+
 from flask import Flask
 from config import config
 import serial
 import time
 import threading
+import sys
 
 
 app = Flask(__name__)
@@ -11,6 +15,12 @@ is_running = False
 stop_loop = False
 defaultstateline1 = config.defaultStateLine1
 defaultstateline2 = config.defaultStateLine2
+scrolledstr1 = ""
+scrolledstr2 = ""
+poke1syn = False
+poke1ack = False
+poke2syn = False
+poke2ack = False
 
 # ---- Write Pipelines ----
 
@@ -49,9 +59,10 @@ def write_pipeline(str1, str2, close=True, scroll=False, blink=False, *args, **k
 
 def direct_write(str1, str2, close=True):
     with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser: 
-        ser.write(f'\r{str1}\r'.encode())
         if str2:
-            ser.write(str2.encode())
+            ser.write(f'\r{str1}\r{str2}'.encode())
+        else: 
+            ser.write(f'\r{str1}\r'.encode())
         if close == True:
                 ser.close()
 
@@ -61,8 +72,6 @@ def default_state():
     if config.blankDefaultState == True: #blank the display
         blank()
         print("Blanked the display.")
-    elif config.dynamicDefaultState == True:
-        direct_write(defaultstateline1, defaultstateline2)
     else:
         direct_write(config.defaultStateLine1, config.defaultStateLine2, True)
 
@@ -90,43 +99,144 @@ def blink(str1, str2, close, blinkspeed=config.blinkspeed, *args, **kwargs):
             blank(close=False)
             time.sleep(blinkspeed)
 
-def scroll(str1, str2, close, *args, **kwargs): #there's gotta be a better way to do this right? tk 
-    if not len(str1) > config.columns and len(str2) > config.columns:
-        scrollboth(str1, str2, close=close)
-    elif len(str1) > config.columns:
-        scroll1(str1, str2, close=close)
-    elif len(str2) > config.columns:
-        scroll2(str1, str2, close=close)
 
-
-def scroll0(str1, str2, close, *args, **kwargs):
+def scrolltest():
     global stop_loop
     stop_loop = False
-    str1len = len(str1)
-    str1list = list(str1)
-    wrapped_str1 = str1 + str1[:config.columns]
-    while not stop_loop:
-        for i in range(len(str1) + config.columns - 1):
-            str1_slice = wrapped_str1[i:i + config.columns - 1]
-            direct_write(str1=str1_slice, str2=str2, close=False)
-            print(str1_slice)
-            time.sleep(config.scrollspeed)
+    scrollthread(str1="i got the scrolling working guys :)", str2="two lines tooooooooooooo")
+    time.sleep(60)
+    # stop_loop = True
+    # default_state()
 
-def scroll1(str1, str2, close, *args, **kwargs):
+def scrollthread(*args, **kwargs):
+    thread = threading.Thread(target=scroll, args=args, kwargs=kwargs)
+    thread.start()
+
+def scroll(str1, str2):
+    global scrolledstr1, stop_loop, poke1syn, poke1ack, scrolledstr2, poke2syn, poke2ack
+    scrollstr1thread(str1)
+    scrollstr2thread(str2)
+    stoploopthread(60)
+    while not stop_loop:
+        while not poke1syn:
+            time.sleep(0.01)
+            # print('poke1syn no', file=sys.stdout)
+        str1 = scrolledstr1
+        poke1ack = True
+        while not poke2syn:
+            # print('poke2syn no', file=sys.stdout)
+            time.sleep(0.01)
+        str2 = scrolledstr2
+        poke2ack = True
+        direct_write(str1, str2, close=False)
+        time.sleep(config.scrollspeed)
+
+
+def scrollstr1thread(*args, **kwargs):
+    thread = threading.Thread(target=scrollstr1, args=args, kwargs=kwargs)
+    thread.start()
+
+def scrollstr1(str1):
+    global scrolledstr1, poke1syn, poke1ack, stop_loop
+    flipflop = False
+    poke1syn = False
+    poke1ack = False
+    while not stop_loop:
+        if len(str1) <= config.row1columns:
+            scrolledstr1 = str1
+            time.sleep(5)
+        elif len(str1) > config.row1columns & flipflop == False:
+            for i in range(len(str1)):
+                c = i + config.row1columns 
+                scrolledstr1 = str1[i:c]
+                poke1syn = True
+                while not poke1ack:
+                    time.sleep(0.01)
+                poke1syn = False
+                poke1ack = False
+                if c == (len(str1)):
+                    poke1syn = True
+                    flipflop = True
+                    time.sleep(1.5)
+                    poke1syn = False
+                    poke1syn = False
+                    break
+        elif len(str1) > config.row1columns & flipflop == True:
+            for i in range(len(str1), 0, -1):
+                c = i - config.row1columns - 1
+                time.sleep(config.scrollspeed)
+                scrolledstr1 = str1[c:i-1]
+                poke1syn = True
+                while not poke1ack:
+                    time.sleep(0.01)
+                poke1syn = False
+                poke1ack = False
+                if i == 20:
+                    poke1syn = True
+                    flipflop = False
+                    time.sleep(1.5)
+                    poke1syn = False
+                    poke1ack = False
+                    break
+
+def scrollstr2thread(*args, **kwargs):
+    thread = threading.Thread(target=scrollstr2, args=args, kwargs=kwargs)
+    thread.start()
+
+def scrollstr2(str2):
+    global scrolledstr2, poke2syn, poke2ack, stop_loop
+    flipflop2 = False
+    poke2syn = False
+    poke2ack = False
+    while not stop_loop:
+        if len(str2) <= config.row2columns:
+            scrolledstr2 = str2
+            poke2syn = True
+            time.sleep(5)
+        elif len(str2) > config.row2columns & flipflop2 == False:
+            for i in range(len(str2)):
+                c = i + config.row2columns
+                scrolledstr2 = str2[i:c]
+                poke2syn = True
+                while not poke2ack:
+                    time.sleep(0.01)
+                poke2syn = False
+                poke2ack = False
+                if c == (len(str2)):
+                    poke2syn = True
+                    flipflop2 = True
+                    time.sleep(1.5)
+                    poke2syn = False
+                    poke2ack = False
+                    break
+        elif len(str2) > config.row2columns & flipflop2 == True:
+            for i in range(len(str2), 0, -1):
+                c = i - config.row1columns - 1
+                time.sleep(config.scrollspeed)
+                scrolledstr2 = str2[c:i-1]
+                poke2syn = True
+                while not poke2ack:
+                    time.sleep(0.01)
+                poke2syn = False
+                poke2ack = False
+                if i == 20:
+                    poke2syn = True
+                    flipflop2 = False
+                    time.sleep(1.5)
+                    poke2syn = False
+                    poke2ack = False
+                    break
+
+# ---- The Loop Stopperrrrr -----
+
+def stoploopthread(*args, **kwargs):
+    thread = threading.Thread(target=stoploop, args=args, kwargs=kwargs)
+    thread.start()
+
+def stoploop(len):
     global stop_loop
-    stop_loop = False
-    str1len = len(str1)
-    str1 = " " + str1 + " "
-    while not stop_loop:
-        for i in range(len(str1)):
-            str1_slice = str1[i:i + config.columns - 1]
-            direct_write(str1=str1_slice, str2=str2, close=False)
-            print(str1_slice)
-            time.sleep(config.scrollspeed)
-
-
-
-
+    time.sleep(len)
+    stop_loop = True
 
 
 # ---- Flask Paths ----
@@ -145,11 +255,11 @@ def display(str1=None, str2=None):
     print(f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
     return f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
 
-@app.route('/default/<str1>:<str2>', methods=['GET'])
-def entering(str1, str2):
-    set_default_state(str1, str2)
-    print(f"Set 2 lines as default on display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
-    return f"Set 2 lines as default on display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
+# @app.route('/default/<str1>:<str2>', methods=['GET'])
+# def entering(str1, str2):
+#     set_default_state(str1, str2)
+#     print(f"Set 2 lines as default on display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
+#     return f"Set 2 lines as default on display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
 
 @app.route('/test', methods=['GET'])
 def test():
@@ -166,8 +276,16 @@ def test():
 
 @app.route('/testscroll', methods=['GET'])
 def testscroll():
-    scroll1("onetwothreefourfivesixseveneightnine", "test", close=True)
+    # scroll1("hello this is an example of scrolling text", "test", close=True)
+    scrolltest()
     return f"pls", 200
+
+@app.route('/testwrite', methods=['GET'])
+def testwrite():
+    blank()
+    direct_write("distincttext8482939", "fuckitallsonnnnnnnnn", close=True)
+    return f"pls", 200
+
 
 if __name__ == '__main__':
     app.run(port=config.port, debug=True)

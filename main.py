@@ -7,55 +7,78 @@ import serial
 import time
 import threading
 import sys
+import asyncio
+import traceback
 
 
 app = Flask(__name__)
-lock = threading.Lock()
-is_running = False
-stop_loop = False
 defaultstateline1 = config.defaultStateLine1
 defaultstateline2 = config.defaultStateLine2
-scrolledstr1 = ""
-scrolledstr2 = ""
-poke1syn = False
-poke1ack = False
-poke2syn = False
-poke2ack = False
+
+class AsyncThread(threading.Thread):
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.task = None
+        super().__init__(target=self.loop.run_forever)
+
+
+        # def custom_exception_handler(loop, context):
+        #     print('hi!')
+        #     exception = context.get("exception", "Unknown error")
+        #     message = context.get("message", "")
+
+        #     if exception:
+        #         traceback.print_exception(type(exception), exception, exception.__traceback__, file=sys.stderr)
+        #     if message:
+        #         print(f"Message: {message}", file=sys.stderr)
+
+        # self.loop.set_exception_handler(custom_exception_handler)
+
+        self.loop.call_soon_threadsafe(lambda: asyncio.set_event_loop(self.loop))
+
+    def run_task(self, coro):
+        if self.task:
+            self.task.cancel()
+        self.task = asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+        def task_handler(task):
+            if exc := task.exception():
+                raise exc
+                # traceback.print_exception(exc)
+
+        self.task.add_done_callback(task_handler)
+
+    def runin(self, coro):
+        def wraps(*args, **kwargs):
+            print('run_task', coro, args, kwargs)
+            self.run_task(coro(*args, **kwargs))
+        return wraps
+
+renderthread = AsyncThread()
+renderthread.start()
 
 # ---- Write Pipelines ----
 
-def regular_send_thread(*args, **kwargs):
-    thread = threading.Thread(target=regular_send, args=args, kwargs=kwargs)
-    thread.start()
+@renderthread.runin
+async def regular_send(*args, fadetime=config.defaultFadetime, **kwargs):
+    try:
+        with asyncio.timeout(fadetime):
+            await write_pipeline(*args, fadetime=fadetime, **kwargs) #kk
+    finally:
+        default_state()
 
-def regular_send(*args, fadetime=config.defaultFadetime, **kwargs):
-    global is_running
-    while True:
-        with lock:
-            if not is_running:
-                is_running = True
-                break
-    write_pipeline_thread(*args, fadetime=fadetime, **kwargs) #tk 
-    time.sleep(fadetime)
-    default_state()
-
-def write_pipeline_thread(*args, **kwargs):
-    thread = threading.Thread(target=write_pipeline, args=args, kwargs=kwargs)
-    thread.start()
-
-def write_pipeline(str1, str2, close=True, scroll=False, blink=False, *args, **kwargs): #tk change default of scroll when its implemented
+async def write_pipeline(str1, str2, close=True, scroll=False, blink=False, *args, **kwargs): #tk change default of scroll when its implemented
     if scroll == False and blink == False: #if it doesnt use special features, we can just write it directly
         direct_write(str1=str1, str2=str2, close=close) 
+        await asyncio.Event().wait()  # run forever (until cancelled)
     elif scroll == True and blink == True:
         direct_write(str1="Err", str2="2", close=close) #Error 2, scroll and blink are both enabled. can't do this atm sorry!
+        await asyncio.sleep(2)
         raise(Exception, "Error 2, scroll and blink cannot both be enabled.")
     elif scroll == True:
-        if not len(str1) <= config.columns and not len(str2) <= config.columns: #maybe make it wiggle if it doesnt need to scroll but not right now
-            direct_write(str1, str2, close=close)
-        else:
-            scroll(str1=str1, str2=str2, args=args, kwargs=kwargs)
+        await scroll(str1=str1, str2=str2, args=args, kwargs=kwargs)
     elif blink == True:
-        blink(str1=str1, str2=str2, args=args, kwargs=kwargs)
+        await blink(str1=str1, str2=str2, args=args, kwargs=kwargs)
 
 def direct_write(str1, str2, close=True):
     with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser: 
@@ -67,8 +90,6 @@ def direct_write(str1, str2, close=True):
                 ser.close()
 
 def default_state():
-    global stop_loop, defaultstateline1, defaultstateline2
-    stop_loop=True
     if config.blankDefaultState == True: #blank the display
         blank()
         print("Blanked the display.")
@@ -89,169 +110,47 @@ def blank(close=True):
         if close == True:     
             ser.close()
 
-def blink(str1, str2, close, blinkspeed=config.blinkspeed, *args, **kwargs):
-    global stop_loop
-    stop_loop = False
-    while not stop_loop:
-        with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser:
-            direct_write(str1, str2, close=False)
-            time.sleep(blinkspeed)
-            blank(close=False)
-            time.sleep(blinkspeed)
-
-
-def scrolltest():
-    global stop_loop
-    stop_loop = False
-    scrollthread(str1="i got the scrolling working guys :)", str2="two lines tooooooooooooo")
-    time.sleep(60)
-    # stop_loop = True
-    # default_state()
-
-def scrollthread(*args, **kwargs):
-    thread = threading.Thread(target=scroll, args=args, kwargs=kwargs)
-    thread.start()
-
-def scroll(str1, str2):
-    global scrolledstr1, stop_loop, poke1syn, poke1ack, scrolledstr2, poke2syn, poke2ack
-    scrollstr1thread(str1)
-    scrollstr2thread(str2)
-    stoploopthread(60)
-    while not stop_loop:
-        while not poke1syn:
-            time.sleep(0.01)
-            # print('poke1syn no', file=sys.stdout)
-        str1 = scrolledstr1
-        poke1ack = True
-        while not poke2syn:
-            # print('poke2syn no', file=sys.stdout)
-            time.sleep(0.01)
-        str2 = scrolledstr2
-        poke2ack = True
+async def blink(str1, str2, close, blinkspeed=config.blinkspeed, *args, **kwargs):
+    while True:
         direct_write(str1, str2, close=False)
-        time.sleep(config.scrollspeed)
+        await asyncio.sleep(blinkspeed)
+        blank(close=False)
+        await asyncio.sleep(blinkspeed)
 
 
-def scrollstr1thread(*args, **kwargs):
-    thread = threading.Thread(target=scrollstr1, args=args, kwargs=kwargs)
-    thread.start()
+@renderthread.runin
+async def scrolltest():
+    await scroll(str1="i got the scrolling working guys :)", str2="two lines tooooooooooooo")
 
-def scrollstr1(str1):
-    global scrolledstr1, poke1syn, poke1ack, stop_loop
-    flipflop = False
-    poke1syn = False
-    poke1ack = False
-    while not stop_loop:
-        if len(str1) <= config.row1columns:
-            scrolledstr1 = str1
-            time.sleep(5)
-        elif len(str1) > config.row1columns & flipflop == False:
-            for i in range(len(str1)):
-                c = i + config.row1columns 
-                scrolledstr1 = str1[i:c]
-                poke1syn = True
-                while not poke1ack:
-                    time.sleep(0.01)
-                poke1syn = False
-                poke1ack = False
-                if c == (len(str1)):
-                    poke1syn = True
-                    flipflop = True
-                    time.sleep(1.5)
-                    poke1syn = False
-                    poke1syn = False
-                    break
-        elif len(str1) > config.row1columns & flipflop == True:
-            for i in range(len(str1), 0, -1):
-                c = i - config.row1columns - 1
-                time.sleep(config.scrollspeed)
-                scrolledstr1 = str1[c:i-1]
-                poke1syn = True
-                while not poke1ack:
-                    time.sleep(0.01)
-                poke1syn = False
-                poke1ack = False
-                if i == 20:
-                    poke1syn = True
-                    flipflop = False
-                    time.sleep(1.5)
-                    poke1syn = False
-                    poke1ack = False
-                    break
+async def scroll(str1, str2):
+    scroll1, scroll2 = scrollstr(str1, config.row1columns), scrollstr(str2, config.row2columns)
+    for line1, line2 in zip(scroll1, scroll2):
+        direct_write(str1, str2, close=False)
+        await asyncio.sleep(config.scrollspeed)
 
-def scrollstr2thread(*args, **kwargs):
-    thread = threading.Thread(target=scrollstr2, args=args, kwargs=kwargs)
-    thread.start()
-
-def scrollstr2(str2):
-    global scrolledstr2, poke2syn, poke2ack, stop_loop
-    flipflop2 = False
-    poke2syn = False
-    poke2ack = False
-    while not stop_loop:
-        if len(str2) <= config.row2columns:
-            scrolledstr2 = str2
-            poke2syn = True
-            time.sleep(5)
-        elif len(str2) > config.row2columns & flipflop2 == False:
-            for i in range(len(str2)):
-                c = i + config.row2columns
-                scrolledstr2 = str2[i:c]
-                poke2syn = True
-                while not poke2ack:
-                    time.sleep(0.01)
-                poke2syn = False
-                poke2ack = False
-                if c == (len(str2)):
-                    poke2syn = True
-                    flipflop2 = True
-                    time.sleep(1.5)
-                    poke2syn = False
-                    poke2ack = False
-                    break
-        elif len(str2) > config.row2columns & flipflop2 == True:
-            for i in range(len(str2), 0, -1):
-                c = i - config.row1columns - 1
-                time.sleep(config.scrollspeed)
-                scrolledstr2 = str2[c:i-1]
-                poke2syn = True
-                while not poke2ack:
-                    time.sleep(0.01)
-                poke2syn = False
-                poke2ack = False
-                if i == 20:
-                    poke2syn = True
-                    flipflop2 = False
-                    time.sleep(1.5)
-                    poke2syn = False
-                    poke2ack = False
-                    break
-
-# ---- The Loop Stopperrrrr -----
-
-def stoploopthread(*args, **kwargs):
-    thread = threading.Thread(target=stoploop, args=args, kwargs=kwargs)
-    thread.start()
-
-def stoploop(len):
-    global stop_loop
-    time.sleep(len)
-    stop_loop = True
-
+from itertools import repeat
+def scrollstr(s: str, rowlen: int):
+    if len(s) < rowlen:
+        yield from repeat(s)   #maybe make it wiggle if it doesnt need to scroll but not right now
+    while True:
+        for window in range(0, len(s) - rowlen):
+            yield s[window:window+rowlen]
+        for window in range(len(s) - rowlen, 0, -1):
+            yield s[window:window+rowlen]
 
 # ---- Flask Paths ----
 
 @app.route('/entering/<str2>', methods=['GET'])
 def entering(str2):
     str1 = "Now Entering:"
-    regular_send_thread(str1, str2, config.defaultFadetime)
+    regular_send(str1, str2, config.defaultFadetime)
     print(f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
     return f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
 
 @app.route('/display/<str1>', methods=['GET'])
 @app.route('/display/<str1>:<str2>', methods=['GET'])
 def display(str1=None, str2=None):
-    regular_send_thread(str1=str1, str2=str2)
+    regular_send(str1=str1, str2=str2)
     print(f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.")
     return f"Sent 2 lines to display. \"{str1 or '-nothing-'}\" on line 1 and \"{str2 or '-nothing-'}\" on line 2.", 200
 
@@ -265,13 +164,13 @@ def display(str1=None, str2=None):
 def test():
     with serial.Serial(config.tty, config.baudrate, timeout=config.timeout) as ser:
         print("Was able to connect to display!")
-        regular_send_thread("hiii", ":3")
+        regular_send("hiii", ":3")
         ser.close()
     if config.defaultFadetime < 1 or config.defaultFadetime > 1000:
         return f"Your fadetime is {config.defaultFadeTime}. Please note that this value is in seconds and should be 1 or greater.", 200
     if len(config.defaultStateLine1) > config.columns:
         return f"One of your defaultStateLines is greater than the number of columns on your display as defined in the config. Your default state will not display correctly.", 200
-        regular_send_thread("Check", "Config", 20)
+        regular_send("Check", "Config", 20)
     return f"If you saw some text on the display, you're all set!", 200
 
 @app.route('/testscroll', methods=['GET'])
